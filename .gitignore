@@ -8,3 +8,4 @@ firmware-*/
 my-settings*.txt
 cyt-config.applied*
 __pycache__/
+*.part

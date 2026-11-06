@@ -36,7 +36,7 @@ mihomo (Clash.Meta) с веб-панелью, PCManFM, pipewire. Графика 
     sudo bash build-image.sh     # 40-90 минут; результат: linux-image/build/cleanyourtv-x96q.img.xz
     xz -dc ../build/cleanyourtv-x96q.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
 
-Скрипт сам скачивает базовый образ Armbian (хеш закреплён), берёт из него загрузчик и дерево устройств и правит их
+Скрипт сам скачивает базовый образ Armbian из релиза этого репозитория (`base-image-v1`, хеш закреплён), берёт из него загрузчик и дерево устройств и правит их
 (`patch-spl.py`, `dtb/mkdtb.py`), собирает драйвер Wi-Fi из исходников (`wifi/build-driver.sh`) и ставит программы.
 В репозитории нет ни образов, ни бинарников. Подробности по настройке, окну настроек и VPN:
 [linux-image/image/README.md](linux-image/image/README.md). Откуда что берётся и на каких лицензиях: [THIRD_PARTY.md](THIRD_PARTY.md).
