@@ -108,17 +108,6 @@ rm -f "$RC"; printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$RC"
 NSP=(systemd-nspawn -q -D "$M" --console=pipe --resolv-conf=off)
 [ "$("${NSP[@]}" /bin/uname -m)" = aarch64 ] || { echo "arm64 emulation does not work"; exit 1; }
 install -m 644 "$HERE/overlay/etc/apt/apt.conf.d/99cyt" "$M/etc/apt/apt.conf.d/99cyt"
-# If the computer uses a proxy (https_proxy / http_proxy), apt inside the container uses it too: the container shares the
-# host network. The file is removed again before the image is finished, so the proxy never ends up in the image.
-PX=${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}
-if [ -n "$PX" ]; then
-  if curl -sS -m 10 -x "$PX" -o /dev/null https://deb.debian.org/debian/ 2>/dev/null; then
-    printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' "$PX" "$PX" > "$M/etc/apt/apt.conf.d/98build-proxy"
-    echo "apt uses the proxy $PX"
-  else
-    echo "WARNING: the proxy $PX does not answer, apt will go direct"
-  fi
-fi
 
 echo "== installing the desktop and apps (15-40 minutes under emulation)"
 "${NSP[@]}" /bin/bash -eu <<'EOS'
@@ -196,7 +185,6 @@ echo "== cleaning"
 "${NSP[@]}" /bin/bash -c 'apt-get clean; rm -rf /tmp/* /root/.cache /root/.bash_history /home/tv/.cache; rm -f /etc/ssh/ssh_host_*; : > /etc/machine-id; rm -f /var/lib/dbus/machine-id'
 rm -f "$M/var/log/"*.log "$M/var/log/journal/"* 2>/dev/null || true
 rm -f "$M/root/bootlog.txt" "$M/var/lib/cyt/"* 2>/dev/null || true
-rm -f "$M/etc/apt/apt.conf.d/98build-proxy"            # the build proxy must not stay in the image
 echo tvbox > "$M/etc/hostname"
 if [ -n "$RC_LINK" ]; then rm -f "$RC"; ln -s "$RC_LINK" "$RC"; fi
 sync; umount -R "$M"
