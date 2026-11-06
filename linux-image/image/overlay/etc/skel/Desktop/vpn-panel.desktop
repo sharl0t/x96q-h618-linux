@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=VPN panel
+Comment=mihomo web UI (choose the server)
+Icon=network-vpn
+Terminal=false
+Exec=firefox-esr http://127.0.0.1:9090/ui/

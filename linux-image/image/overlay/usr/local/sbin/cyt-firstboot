@@ -1,0 +1,329 @@
+#!/usr/bin/python3 -I
+"""Applies /boot/cyt-config.txt (or CYTCONF USB stick) and grows the root partition. Runs at every boot, as root.
+Secrets are wiped from the file after they are applied and never written to the log."""
+import hashlib, os, re, subprocess, sys, time, shutil, pwd
+
+LOG = '/var/log/cyt-firstboot.log'
+CONF = '/boot/cyt-config.txt'
+SECRET = ('USER_PASSWORD', 'ROOT_PASSWORD', 'WIFI_PASSWORD', 'VPN_SUBSCRIPTION')
+KEYS = ('WIFI_SSID', 'WIFI_PASSWORD', 'WIFI_COUNTRY', 'USER_NAME', 'USER_PASSWORD', 'ROOT_PASSWORD', 'AUTOLOGIN', 'SSH',
+        'HOSTNAME', 'TIMEZONE', 'LANG', 'KEYBOARD_LAYOUTS', 'KEYBOARD_TOGGLE', 'VPN_SUBSCRIPTION', 'VPN_MODE',
+        'VPN_BROWSER', 'VPN_DIRECT_SUFFIXES', 'RESOLUTION', 'ACCEL')
+
+
+def log(msg):
+    with open(LOG, 'a') as f:
+        f.write('%s %s\n' % (time.strftime('%F %T'), msg))
+
+
+def run(*cmd, inp=None, check=False):
+    r = subprocess.run(cmd, input=inp, capture_output=True, text=True)
+    if r.returncode and check:
+        log('FAILED: %s: %s' % (cmd[0], r.stderr.strip()[:300]))
+    return r.returncode
+
+
+def grow_root():
+    if os.path.exists('/var/lib/cyt/grown'):
+        return
+    os.makedirs('/var/lib/cyt', exist_ok=True)
+    src = subprocess.run(['findmnt', '-no', 'SOURCE', '/'], capture_output=True, text=True).stdout.strip()
+    m = re.match(r'^(/dev/mmcblk\d+|/dev/sd[a-z]+)p?(\d+)$', src)
+    if m:
+        disk, num = m.group(1), m.group(2)
+        run('sfdisk', '--no-reread', '-N', num, disk, inp=', +\n')
+        run('partx', '-u', disk)
+        run('resize2fs', src)
+        log('root partition grown: ' + src)
+    open('/var/lib/cyt/grown', 'w').close()
+
+
+def find_config():
+    if os.path.exists(CONF):
+        return CONF
+    r = subprocess.run(['blkid', '-L', 'CYTCONF'], capture_output=True, text=True)
+    dev = r.stdout.strip()
+    if dev:
+        os.makedirs('/run/cyt-usb', exist_ok=True)
+        if run('mount', '-o', 'ro', dev, '/run/cyt-usb') == 0:
+            p = '/run/cyt-usb/cyt-config.txt'
+            if os.path.exists(p):
+                return p
+            run('umount', '/run/cyt-usb')
+    return None
+
+
+def parse(path):
+    cfg = {}
+    for line in open(path, encoding='utf-8', errors='replace').read().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        k, v = line.split('=', 1)
+        k, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in '"\'':
+            v = v[1:-1]
+        if k in KEYS and v:
+            cfg[k] = v
+    return cfg
+
+
+def write(path, text, mode=0o644):
+    with open(path, 'w') as f:
+        f.write(text)
+    os.chmod(path, mode)
+
+
+def primary_user():
+    for p in pwd.getpwall():
+        if p.pw_uid == 1000:
+            return p.pw_name
+    return None
+
+
+PENDING = '/var/lib/cyt/pending-rename'
+
+
+def do_rename(old, new):
+    """usermod refuses while the user has running processes (i.e. while logged in); report why."""
+    r = subprocess.run(['usermod', '-l', new, '-d', '/home/' + new, '-m', old], capture_output=True, text=True)
+    if r.returncode:
+        log('rename %s -> %s refused: %s' % (old, new, (r.stderr or r.stdout).strip()[:200]))
+        return False
+    run('groupmod', '-n', new, old)
+    p = '/etc/lightdm/lightdm.conf.d/50-autologin.conf'
+    if os.path.exists(p):
+        t = open(p).read().replace('autologin-user=%s\n' % old, 'autologin-user=%s\n' % new)
+        write(p, t)
+    log('user renamed: %s -> %s' % (old, new))
+    return True
+
+
+def rename_now(old, new):
+    """Runs as its own systemd unit (so it outlives the user's session): end the session, rename, restart the screen.
+    LightDM then logs the new name in by itself (autologin) or shows the login screen."""
+    if not (re.fullmatch(r'[a-z][a-z0-9_-]{0,30}', old) and re.fullmatch(r'[a-z][a-z0-9_-]{0,30}', new)):
+        return
+    run('loginctl', 'terminate-user', old)
+    for _ in range(20):
+        if subprocess.run(['pgrep', '-u', old], capture_output=True).returncode != 0:
+            break
+        time.sleep(0.5)
+    else:
+        run('pkill', '-KILL', '-u', old)
+        time.sleep(1)
+    do_rename(old, new)
+    run('systemctl', 'restart', '--no-block', 'lightdm')
+
+
+def finish_pending_rename():
+    """A rename that could not be done in a live session is done here, at boot, before anybody logs in."""
+    if not os.path.exists(PENDING):
+        return
+    try:
+        old, new = open(PENDING).read().split()
+        known = {p.pw_name for p in pwd.getpwall()}
+        if old in known and new not in known:
+            do_rename(old, new)
+    except Exception as e:
+        log('pending rename failed: %r' % e)
+    try:
+        os.remove(PENDING)
+    except FileNotFoundError:
+        pass
+
+
+def apply(cfg):
+    user = primary_user()
+    if 'HOSTNAME' in cfg and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,30}', cfg['HOSTNAME']):
+        h = cfg['HOSTNAME']
+        write('/etc/hostname', h + '\n')
+        write('/etc/hosts', '127.0.0.1 localhost\n127.0.1.1 %s\n::1 localhost ip6-localhost ip6-loopback\n' % h)
+        run('hostname', h)
+    if 'TIMEZONE' in cfg and re.fullmatch(r'[A-Za-z0-9_+/-]+', cfg['TIMEZONE']) and \
+            os.path.isfile('/usr/share/zoneinfo/' + cfg['TIMEZONE']):
+        run('ln', '-sf', '/usr/share/zoneinfo/' + cfg['TIMEZONE'], '/etc/localtime')
+        write('/etc/timezone', cfg['TIMEZONE'] + '\n')
+    if 'LANG' in cfg and re.fullmatch(r'[A-Za-z_]+\.UTF-8', cfg['LANG']):
+        write('/etc/default/locale', 'LANG=%s\n' % cfg['LANG'])
+    if 'KEYBOARD_LAYOUTS' in cfg and re.fullmatch(r'[a-z,]+', cfg['KEYBOARD_LAYOUTS']):
+        opt = cfg.get('KEYBOARD_TOGGLE', '')
+        opt = opt if re.fullmatch(r'[a-z_:,]*', opt) else ''
+        write('/etc/default/keyboard', 'XKBLAYOUT="%s"\nXKBOPTIONS="%s"\n' % (cfg['KEYBOARD_LAYOUTS'], opt))
+        write('/etc/X11/xorg.conf.d/00-keyboard.conf',
+              'Section "InputClass"\n  Identifier "keyboard"\n  MatchIsKeyboard "on"\n'
+              '  Option "XkbLayout" "%s"\n  Option "XkbOptions" "%s"\nEndSection\n' % (cfg['KEYBOARD_LAYOUTS'], opt))
+    # --- screen: resolution and acceleration (the software cursor is always on, the hardware one blinks)
+    res, acc = cfg.get('RESOLUTION', ''), cfg.get('ACCEL', '').lower()
+    if (res and re.fullmatch(r'\d{3,4}x\d{3,4}', res)) or acc in ('glamor', 'none'):
+        res = res if re.fullmatch(r'\d{3,4}x\d{3,4}', res) else '1280x720'
+        acc = acc if acc in ('glamor', 'none') else 'glamor'
+        write('/etc/X11/xorg.conf.d/20-modesetting.conf',
+              'Section "Monitor"\n  Identifier "Monitor-HDMI"\n  Option "PreferredMode" "%s"\nEndSection\n\n'
+              'Section "Device"\n  Identifier "sunxi"\n  Driver "modesetting"\n  Option "SWcursor" "true"\n'
+              '  Option "AccelMethod" "%s"\n%s  Option "Monitor-HDMI-1" "Monitor-HDMI"\nEndSection\n'
+              % (res, acc, '  Option "ShadowFB" "true"\n' if acc == 'none' else ''))
+    # --- accounts
+    new = cfg.get('USER_NAME')
+    if new and user and new != user and re.fullmatch(r'[a-z][a-z0-9_-]{0,30}', new):
+        if do_rename(user, new):
+            user = new
+        elif run('systemd-run', '--unit=cyt-rename', '--on-active=6', '/usr/local/sbin/cyt-firstboot',
+                 '--rename-now', user, new) == 0:
+            # the password below goes to the old name and moves with it
+            log('rename scheduled: in a few seconds the screen restarts and you are logged in as ' + new)
+        else:
+            write(PENDING, '%s %s\n' % (user, new))
+            log('rename postponed to the next boot, please restart the box')
+    if 'USER_PASSWORD' in cfg and user:
+        run('chpasswd', inp='%s:%s\n' % (user, cfg['USER_PASSWORD']), check=True)
+    if 'ROOT_PASSWORD' in cfg:
+        run('chpasswd', inp='root:%s\n' % cfg['ROOT_PASSWORD'], check=True)
+    if user and (cfg.get('AUTOLOGIN', 'yes').lower() != 'no'):
+        os.makedirs('/etc/lightdm/lightdm.conf.d', exist_ok=True)
+        write('/etc/lightdm/lightdm.conf.d/50-autologin.conf',
+              '[Seat:*]\nautologin-user=%s\nautologin-user-timeout=0\nautologin-session=openbox\n' % user)
+    elif cfg.get('AUTOLOGIN', '').lower() == 'no':
+        try:
+            os.remove('/etc/lightdm/lightdm.conf.d/50-autologin.conf')
+        except FileNotFoundError:
+            pass
+    if 'SSH' in cfg:
+        if cfg['SSH'].lower() == 'yes':
+            run('ssh-keygen', '-A')               # host keys are made on the box, never shipped in the image
+            run('systemctl', 'enable', '--now', '--no-block', 'ssh')
+        else:
+            run('systemctl', 'disable', '--now', '--no-block', 'ssh')
+    # --- Wi-Fi
+    ssid, pw = cfg.get('WIFI_SSID'), cfg.get('WIFI_PASSWORD')
+    if ssid and pw:
+        if len(ssid.encode()) <= 32 and 8 <= len(pw) <= 63:
+            psk = hashlib.pbkdf2_hmac('sha1', pw.encode(), ssid.encode(), 4096, 32).hex()
+            q = lambda s: s.replace('\\', '\\\\').replace('"', '\\"')
+            cc = cfg.get('WIFI_COUNTRY', '')[:2].upper()
+            write('/etc/wpa_supplicant/wpa_supplicant-wlan0.conf',
+                  'ctrl_interface=DIR=/run/wpa_supplicant GROUP=netdev\nupdate_config=1\n%s\n'
+                  'network={\n\tssid="%s"\n\tpsk=%s\n}\n'
+                  % ('country=' + cc + '\n' if cc.isalpha() and len(cc) == 2 else '', q(ssid), psk), 0o600)
+            run('systemctl', 'restart', '--no-block', 'wpa_supplicant@wlan0')
+            log('Wi-Fi configured for ssid of %d bytes' % len(ssid.encode()))
+        else:
+            log('Wi-Fi skipped: SSID up to 32 bytes and password 8-63 characters are required')
+    # --- VPN. The link is wiped from the file after use, so a change of mode or of the direct list alone
+    # reuses the link, the mode and the direct list that are already in /etc/mihomo/config.yaml.
+    sub = cfg.get('VPN_SUBSCRIPTION')
+    mode = cfg.get('VPN_MODE', '').lower()
+    direct = cfg.get('VPN_DIRECT_SUFFIXES')
+    if not sub and (mode or direct is not None):
+        cur = read_vpn()
+        if cur:
+            sub = cur['sub']
+            mode = mode or cur['mode']
+            direct = direct if direct is not None else cur['direct']
+    if sub:
+        if re.fullmatch(r'https?://[^\s"\\]+', sub):
+            mode = mode or 'tun'
+            set_vpn(sub, mode, direct or '')
+            log('VPN configured, mode ' + mode)
+        else:
+            log('VPN skipped: the subscription must be one http(s) link without spaces or quotes')
+    if (sub or mode) and cfg.get('VPN_BROWSER', 'yes').lower() != 'no' and mode == 'proxy' and \
+            os.path.exists('/etc/mihomo/config.yaml'):
+        write('/usr/lib/firefox-esr/defaults/pref/zz-cyt-proxy.js',
+              'pref("network.proxy.type", 1);\npref("network.proxy.socks", "127.0.0.1");\n'
+              'pref("network.proxy.socks_port", 7890);\npref("network.proxy.socks_version", 5);\n'
+              'pref("network.proxy.socks_remote_dns", true);\n')
+    elif mode == 'tun' or cfg.get('VPN_BROWSER', '').lower() == 'no':
+        try:
+            os.remove('/usr/lib/firefox-esr/defaults/pref/zz-cyt-proxy.js')
+        except FileNotFoundError:
+            pass
+
+
+def read_vpn():
+    """Current link, mode and direct suffixes from the written mihomo config, or None."""
+    try:
+        t = open('/etc/mihomo/config.yaml').read()
+    except OSError:
+        return None
+    m = re.search(r'^    url: "([^"]+)"', t, re.M)
+    if not m:
+        return None
+    direct = ','.join(re.findall(r'^  - DOMAIN-SUFFIX,([^,]+),DIRECT$', t, re.M))
+    return {'sub': m.group(1), 'mode': 'tun' if re.search(r'^tun:', t, re.M) else 'proxy', 'direct': direct}
+
+
+def set_vpn(sub, mode, direct):
+    os.makedirs('/etc/mihomo', exist_ok=True)
+    suffixes = [s.strip().lstrip('.') for s in direct.split(',') if re.fullmatch(r'\s*\.?[A-Za-z0-9.-]+\s*', s)]
+    rules = ['  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve', '  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve',
+             '  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve', '  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve']
+    rules += ['  - DOMAIN-SUFFIX,%s,DIRECT' % s for s in suffixes if s]
+    rules.append('  - MATCH,PROXY')
+    tun = ''
+    if mode == 'tun':
+        tun = ('tun:\n  enable: true\n  stack: mixed\n  auto-route: true\n  auto-detect-interface: true\n'
+               '  dns-hijack:\n    - any:53\n'
+               'dns:\n  enable: true\n  ipv6: false\n  enhanced-mode: fake-ip\n  fake-ip-range: 198.18.0.1/16\n'
+               '  default-nameserver: [1.1.1.1, 8.8.8.8]\n'
+               "  nameserver: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']\n"
+               "  fake-ip-filter: ['*.lan', '*.local', '+.msftconnecttest.com']\n")
+    text = ('mixed-port: 7890\nallow-lan: false\nmode: rule\nlog-level: warning\n'
+            'external-controller: 127.0.0.1:9090\nexternal-ui: /etc/mihomo/ui\n' + tun +
+            'proxy-providers:\n  sub:\n    type: http\n    url: "%s"\n    interval: 3600\n    path: ./sub.yaml\n'
+            '    health-check: {enable: true, url: https://www.gstatic.com/generate_204, interval: 600}\n'
+            'proxy-groups:\n  - {name: PROXY, type: select, use: [sub], proxies: [DIRECT]}\n'
+            'rules:\n%s\n' % (sub, '\n'.join(rules)))
+    write('/etc/mihomo/config.yaml', text, 0o600)
+    if mode == 'tun':
+        run('modprobe', 'tun')
+    run('systemctl', 'enable', 'mihomo')
+    run('systemctl', 'restart', '--no-block', 'mihomo')
+
+
+def scrub(path, applied):
+    """Blank the secrets in the config file after use; the file stays writable for the next change."""
+    if path.startswith('/run/cyt-usb'):
+        return
+    out = ['# Applied %s. Passwords and the subscription link were wiped; the other settings were kept.' %
+           time.strftime('%F %T')]
+    for line in open(path, encoding='utf-8', errors='replace').read().splitlines():
+        k = line.split('=', 1)[0].strip()
+        if k in SECRET and '=' in line and not line.lstrip().startswith('#'):
+            line = k + '='
+        if not line.startswith('# Applied '):
+            out.append(line)
+    write(path, '\n'.join(out) + '\n', 0o600)
+
+
+def main():
+    if len(sys.argv) == 4 and sys.argv[1] == '--rename-now':
+        rename_now(sys.argv[2], sys.argv[3])
+        return
+    grow_root()
+    finish_pending_rename()
+    path = find_config()
+    if not path:
+        return
+    stamp = '/var/lib/cyt/applied.sha256'
+    digest = hashlib.sha256(open(path, 'rb').read()).hexdigest()
+    if os.path.exists(stamp) and open(stamp).read().strip() == digest:
+        return                                  # unchanged since the last apply: do nothing
+    cfg = parse(path)
+    if not cfg:
+        return
+    log('applying %s: keys %s' % (path, ', '.join(sorted(cfg))))
+    apply(cfg)
+    scrub(path, cfg)
+    if not path.startswith('/run/cyt-usb'):
+        open(stamp, 'w').write(hashlib.sha256(open(path, 'rb').read()).hexdigest() + '\n')
+    if path.startswith('/run/cyt-usb'):
+        run('umount', '/run/cyt-usb')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:  # never block the boot
+        log('ERROR: %r' % e)
+        sys.exit(0)

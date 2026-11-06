@@ -1,0 +1,32 @@
+#!/usr/bin/python3 -I
+"""Root helper for the settings window: reads KEY=VALUE lines on stdin, keeps only known keys, writes them to
+/boot/cyt-config.txt and applies them at once (cyt-firstboot). Run it through pkexec; it prints what was done."""
+import os, re, subprocess, sys
+
+KEYS = ('WIFI_SSID', 'WIFI_PASSWORD', 'WIFI_COUNTRY', 'USER_NAME', 'USER_PASSWORD', 'ROOT_PASSWORD', 'AUTOLOGIN', 'SSH',
+        'HOSTNAME', 'TIMEZONE', 'LANG', 'KEYBOARD_LAYOUTS', 'KEYBOARD_TOGGLE', 'VPN_SUBSCRIPTION', 'VPN_MODE',
+        'VPN_BROWSER', 'VPN_DIRECT_SUFFIXES', 'RESOLUTION', 'ACCEL')
+lines = []
+for raw in sys.stdin.read().splitlines():
+    k, sep, v = raw.partition('=')
+    k = k.strip()
+    if sep and k in KEYS and '\r' not in v and '\x00' not in v:
+        lines.append('%s=%s' % (k, v.strip()))
+if not lines:
+    print('nothing to apply')
+    sys.exit(1)
+fd = os.open('/boot/cyt-config.txt', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, 'w') as f:
+    f.write('# written by the settings window\n' + '\n'.join(lines) + '\n')
+try:
+    os.remove('/var/lib/cyt/applied.sha256')
+except FileNotFoundError:
+    pass
+before = os.path.getsize('/var/log/cyt-firstboot.log') if os.path.exists('/var/log/cyt-firstboot.log') else 0
+subprocess.run(['/usr/local/sbin/cyt-firstboot'], check=False)
+try:
+    with open('/var/log/cyt-firstboot.log') as f:
+        f.seek(before)
+        print(f.read().strip() or 'applied')
+except OSError:
+    print('applied')

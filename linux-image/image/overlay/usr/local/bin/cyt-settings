@@ -1,0 +1,244 @@
+#!/usr/bin/python3
+"""Settings window for the TV box: Wi-Fi, VPN, account, screen, system.
+It only collects values and hands them to the root helper cyt-apply (through pkexec, which asks for the
+administrator password). Empty fields mean "leave as it is"."""
+import os, re, subprocess, threading, locale
+
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, GLib
+
+RU = (os.environ.get('LANG', '') or locale.getdefaultlocale()[0] or '').lower().startswith('ru')
+
+
+def T(en, ru):
+    return ru if RU else en
+
+
+def sh(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=8).stdout
+    except Exception:
+        return ''
+
+
+class App(Gtk.Window):
+    def __init__(self):
+        super().__init__(title=T('Settings', 'Настройки'))
+        self.set_default_size(560, 430)
+        self.set_border_width(10)
+        self.connect('destroy', Gtk.main_quit)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.add(root)
+        nb = Gtk.Notebook()
+        root.pack_start(nb, True, True, 0)
+        self.f = {}                       # config key -> getter
+        self.secrets = []                 # password fields, cleared after a successful apply
+        nb.append_page(self.page_wifi(), Gtk.Label(label='Wi-Fi'))
+        nb.append_page(self.page_vpn(), Gtk.Label(label='VPN'))
+        nb.append_page(self.page_account(), Gtk.Label(label=T('Account', 'Аккаунт')))
+        nb.append_page(self.page_screen(), Gtk.Label(label=T('Screen', 'Экран')))
+        nb.append_page(self.page_system(), Gtk.Label(label=T('System', 'Система')))
+        hint = Gtk.Label(label=T('Empty fields stay as they are. Passwords are not shown again after applying.',
+                                 'Пустые поля остаются как есть. Пароли после применения не показываются.'))
+        hint.set_xalign(0)
+        hint.get_style_context().add_class('dim-label')
+        root.pack_start(hint, False, False, 0)
+        bar = Gtk.Box(spacing=8)
+        self.status = Gtk.Label(label='')
+        self.status.set_xalign(0)
+        self.status.set_line_wrap(True)
+        self.btn = Gtk.Button(label=T('Apply', 'Применить'))
+        self.btn.get_style_context().add_class('suggested-action')
+        self.btn.connect('clicked', self.on_apply)
+        bar.pack_start(self.status, True, True, 0)
+        bar.pack_end(self.btn, False, False, 0)
+        root.pack_start(bar, False, False, 0)
+
+    # ---- helpers -----------------------------------------------------------------------------------------------------
+    def grid(self):
+        g = Gtk.Grid(column_spacing=10, row_spacing=8, margin=12)
+        g.n = 0
+        return g
+
+    def row(self, g, label, widget, key=None, getter=None):
+        l = Gtk.Label(label=label)
+        l.set_xalign(1)
+        widget.set_hexpand(True)
+        g.attach(l, 0, g.n, 1, 1)
+        g.attach(widget, 1, g.n, 1, 1)
+        g.n += 1
+        if key:
+            self.f[key] = getter or (lambda w=widget: w.get_text().strip())
+        return widget
+
+    def entry(self, secret=False, text=''):
+        e = Gtk.Entry(text=text)
+        if secret:
+            self.secrets.append(e)
+            e.set_visibility(False)
+            e.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        return e
+
+    def choice(self, options):
+        """options: list of (value, label). The first one is 'leave as it is'."""
+        c = Gtk.ComboBoxText()
+        for _, label in options:
+            c.append_text(label)
+        c.set_active(0)
+        return c, (lambda c=c, o=options: o[c.get_active()][0])
+
+    # ---- pages ----------------------------------------------------------------------------------------------------------
+    def page_wifi(self):
+        g = self.grid()
+        self.ssid = Gtk.ComboBoxText.new_with_entry()
+        self.row(g, T('Network name', 'Имя сети'), self.ssid, 'WIFI_SSID',
+                 lambda: self.ssid.get_child().get_text().strip())
+        scan = Gtk.Button(label=T('Scan networks', 'Найти сети'))
+        scan.connect('clicked', self.on_scan)
+        g.attach(scan, 1, g.n, 1, 1)
+        g.n += 1
+        self.row(g, T('Password', 'Пароль'), self.entry(True), 'WIFI_PASSWORD')
+        self.row(g, T('Country (2 letters)', 'Страна (2 буквы)'), self.entry(), 'WIFI_COUNTRY')
+        cur = sh('iwgetid', '-r').strip()
+        info = Gtk.Label(label=(T('Connected to: ', 'Подключено к: ') + cur) if cur else T('Not connected', 'Нет подключения'))
+        info.set_xalign(0)
+        g.attach(info, 1, g.n, 1, 1)
+        return g
+
+    def on_scan(self, _b):
+        sh('wpa_cli', '-i', 'wlan0', 'scan')
+        GLib.timeout_add(3000, self.fill_scan)
+
+    def fill_scan(self):
+        out = sh('wpa_cli', '-i', 'wlan0', 'scan_results').splitlines()[1:]
+        names = []
+        for line in out:
+            p = line.split('\t')
+            if len(p) >= 5 and p[4] and '\\x00' not in p[4] and p[4] not in names:
+                names.append(p[4])
+        self.ssid.remove_all()
+        for n in names:
+            self.ssid.append_text(n)
+        self.status.set_text(T('Networks found: %d', 'Найдено сетей: %d') % len(names))
+        return False
+
+    def page_vpn(self):
+        g = self.grid()
+        self.row(g, T('Subscription link', 'Ссылка подписки'), self.entry(True), 'VPN_SUBSCRIPTION')
+        c, get = self.choice([('', T('keep as is', 'не менять')),
+                              ('proxy', T('proxy (light, apps use 127.0.0.1:7890)', 'proxy (лёгкий, приложения через 127.0.0.1:7890)')),
+                              ('tun', T('tun (whole system, default)', 'tun (вся система, по умолчанию)'))])
+        self.row(g, T('Mode', 'Режим'), c, 'VPN_MODE', get)
+        self.row(g, T('Direct domains (ru,su)', 'Напрямую, без VPN (ru,su)'), self.entry(), 'VPN_DIRECT_SUFFIXES')
+        st = 'active' if sh('systemctl', 'is-active', 'mihomo').strip() == 'active' else T('stopped', 'не запущен')
+        lab = Gtk.Label(label=T('VPN service: ', 'Служба VPN: ') + st)
+        lab.set_xalign(0)
+        g.attach(lab, 1, g.n, 1, 1)
+        g.n += 1
+        b = Gtk.Button(label=T('Open VPN panel (choose server)', 'Открыть панель VPN (выбор сервера)'))
+        b.connect('clicked', lambda _b: subprocess.Popen(['firefox-esr', 'http://127.0.0.1:9090/ui/']))
+        g.attach(b, 1, g.n, 1, 1)
+        return g
+
+    def page_account(self):
+        g = self.grid()
+        cur = os.environ.get('USER', '')
+        self.row(g, T('User name', 'Имя пользователя'), self.entry(text=''), 'USER_NAME')
+        self.row(g, T('New user password', 'Новый пароль пользователя'), self.entry(True), 'USER_PASSWORD')
+        self.row(g, T('New root password', 'Новый пароль root'), self.entry(True), 'ROOT_PASSWORD')
+        c, get = self.choice([('', T('keep as is', 'не менять')), ('yes', T('on', 'включить')), ('no', T('off', 'выключить'))])
+        self.row(g, T('Auto login', 'Автовход'), c, 'AUTOLOGIN', get)
+        c, get = self.choice([('', T('keep as is', 'не менять')), ('yes', T('on', 'включить')), ('no', T('off', 'выключить'))])
+        self.row(g, 'SSH', c, 'SSH', get)
+        l = Gtk.Label(label=T('Current user: ', 'Сейчас: ') + cur + T('  (a new name restarts the screen for a few seconds)', '  (смена имени на несколько секунд перезапустит экран)'))
+        l.set_xalign(0)
+        g.attach(l, 1, g.n, 1, 1)
+        return g
+
+    def page_screen(self):
+        g = self.grid()
+        modes, active = [], ''
+        for line in sh('xrandr').splitlines():
+            m = re.match(r'^\s+(\d{3,4}x\d{3,4})\s', line)
+            if m and m.group(1) not in modes:
+                modes.append(m.group(1))
+            if '*' in line and m:
+                active = m.group(1)
+        c, get = self.choice([('', T('keep as is', 'не менять'))] + [(m, m) for m in modes])
+        self.row(g, T('Resolution', 'Разрешение'), c, 'RESOLUTION', get)
+        c2, get2 = self.choice([('', T('keep as is', 'не менять')),
+                                ('glamor', T('GPU acceleration (glamor)', 'Ускорение на GPU (glamor)')),
+                                ('none', T('software drawing (if something flickers)', 'программная отрисовка (если мигает)'))])
+        self.row(g, T('Graphics', 'Графика'), c2, 'ACCEL', get2)
+        l = Gtk.Label(label=T('Now: ', 'Сейчас: ') + (active or '?') + T('. Applies after the next login/reboot.',
+                                                                      '. Применится после перезахода или перезагрузки.'))
+        l.set_xalign(0)
+        g.attach(l, 1, g.n, 1, 1)
+        return g
+
+    def page_system(self):
+        g = self.grid()
+        self.row(g, T('Host name', 'Имя устройства'), self.entry(text=''), 'HOSTNAME')
+        self.row(g, T('Time zone', 'Часовой пояс'), self.entry(), 'TIMEZONE')
+        self.row(g, T('Keyboard layouts', 'Раскладки клавиатуры'), self.entry(), 'KEYBOARD_LAYOUTS')
+        self.row(g, T('Layout switch', 'Переключение раскладки'), self.entry(), 'KEYBOARD_TOGGLE')
+        l = Gtk.Label(label=T('Example: Europe/Moscow, us,ru, grp:alt_shift_toggle',
+                              'Например: Europe/Moscow, us,ru, grp:alt_shift_toggle'))
+        l.set_xalign(0)
+        g.attach(l, 1, g.n, 1, 1)
+        return g
+
+    # ---- apply ------------------------------------------------------------------------------------------------------------
+    def build(self):
+        out = []
+        for key, get in self.f.items():
+            v = get()
+            if v and '\n' not in v:
+                out.append('%s=%s' % (key, v))
+        return '\n'.join(out) + '\n' if out else ''
+
+    def on_apply(self, _b):
+        text = self.build()
+        if not text:
+            self.status.set_text(T('Nothing to apply.', 'Нечего применять.'))
+            return
+        new = [l.split('=', 1)[1] for l in text.splitlines() if l.startswith('USER_NAME=')]
+        if new and new[0] != os.environ.get('USER', ''):
+            d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                                  buttons=Gtk.ButtonsType.OK_CANCEL,
+                                  text=T('The screen will restart to change the user name. Open programs will close. Continue?',
+                                         'Для смены имени экран перезапустится, открытые программы закроются. Продолжить?'))
+            ok = d.run() == Gtk.ResponseType.OK
+            d.destroy()
+            if not ok:
+                return
+        self.btn.set_sensitive(False)
+        self.status.set_text(T('Waiting for the administrator password...', 'Ждём пароль администратора...'))
+
+        def work():
+            try:
+                r = subprocess.run(['pkexec', '/usr/local/sbin/cyt-apply'], input=text, capture_output=True,
+                                   text=True, timeout=300)
+                ok, msg = r.returncode == 0, (r.stdout + r.stderr).strip()
+                if r.returncode in (126, 127):
+                    msg = T('Cancelled or not authorised.', 'Отменено или нет прав.')
+            except Exception as e:
+                ok, msg = False, str(e)
+            GLib.idle_add(self.done, ok, msg)
+        threading.Thread(target=work, daemon=True).start()
+
+    def done(self, ok, msg):
+        self.btn.set_sensitive(True)
+        last = '\n'.join(msg.splitlines()[-3:])
+        self.status.set_text((T('Done. ', 'Готово. ') if ok else T('Failed. ', 'Не вышло. ')) + last)
+        if ok:
+            for e in self.secrets:
+                e.set_text('')
+        return False
+
+
+if __name__ == '__main__':
+    win = App()
+    win.show_all()
+    Gtk.main()

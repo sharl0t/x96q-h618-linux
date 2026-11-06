@@ -1,0 +1,60 @@
+# Dark bottom panel: launchers, task list, tray, clock.
+rounded = 0
+border_width = 0
+background_color = #1f232b 100
+border_color = #000000 0
+background_color_hover = #2b303b 100
+border_color_hover = #000000 0
+background_color_pressed = #3a4150 100
+border_color_pressed = #000000 0
+rounded = 4
+border_width = 0
+background_color = #3a4150 100
+border_color = #000000 0
+background_color_hover = #4a5266 100
+border_color_hover = #000000 0
+background_color_pressed = #4a5266 100
+border_color_pressed = #000000 0
+
+panel_items = LTSC
+panel_size = 100% 34
+panel_margin = 0 0
+panel_padding = 6 3 6
+panel_background_id = 1
+wm_menu = 1
+panel_position = bottom center horizontal
+autohide = 0
+strut_policy = follow_size
+panel_layer = top
+panel_monitor = all
+
+taskbar_mode = single_desktop
+taskbar_padding = 4 0 4
+taskbar_background_id = 0
+task_text = 1
+task_icon = 1
+task_maximum_size = 200 28
+task_padding = 8 3 4
+task_font = DejaVu Sans 9
+task_font_color = #d3dae3 100
+task_active_font_color = #ffffff 100
+task_background_id = 0
+task_active_background_id = 2
+
+launcher_padding = 4 3 6
+launcher_background_id = 0
+launcher_icon_size = 24
+launcher_item_app = /usr/share/applications/firefox-esr.desktop
+launcher_item_app = /usr/share/applications/org.telegram.desktop.desktop
+launcher_item_app = /usr/share/applications/pcmanfm.desktop
+launcher_item_app = /usr/share/applications/lxterminal.desktop
+
+systray_padding = 4 3 4
+systray_background_id = 0
+systray_icon_size = 20
+
+time1_format = %H:%M
+time1_font = DejaVu Sans 10
+clock_font_color = #d3dae3 100
+clock_padding = 8 0
+clock_background_id = 0

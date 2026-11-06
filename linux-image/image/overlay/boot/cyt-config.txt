@@ -1,0 +1,42 @@
+# cleanyourtv Linux box: ONE settings file, read at every boot.
+# Fill in what you need, save, reboot. Empty lines and lines starting with # are ignored.
+# After it has been applied, the passwords and the subscription link are WIPED from this file
+# (so they do not stay in plain text); put them in again to change them.
+# Where to put it: this file is /boot/cyt-config.txt on the card. A FAT/exFAT USB stick named CYTCONF
+# with a file cyt-config.txt in its root works too (handy from Windows/macOS).
+
+# --- Wi-Fi (WPA2 password, 8-63 characters). WIFI_COUNTRY: optional two letters, e.g. RU ---
+WIFI_SSID=
+WIFI_PASSWORD=
+WIFI_COUNTRY=
+
+# --- Accounts. Defaults: user tv, password tv, root login locked, SSH off. ---
+USER_NAME=
+USER_PASSWORD=
+ROOT_PASSWORD=
+AUTOLOGIN=yes
+SSH=no
+
+# --- System ---
+HOSTNAME=tvbox
+TIMEZONE=Europe/Moscow
+LANG=ru_RU.UTF-8
+KEYBOARD_LAYOUTS=us,ru
+KEYBOARD_TOGGLE=grp:alt_shift_toggle
+
+# --- Screen ---
+# Resolution must be one the TV offers (list: run `xrandr` on the box). Lower = less memory and CPU. Default 1280x720.
+RESOLUTION=
+# glamor = GPU acceleration (default). If something flickers or breaks, set none (software drawing, slower).
+ACCEL=
+
+# --- VPN: mihomo (Clash.Meta). Paste your subscription link. ---
+VPN_SUBSCRIPTION=
+# tun   = (default) the whole system goes through the VPN: Telegram, Firefox, everything, nothing to configure.
+# proxy = lighter on the CPU: only programs that use the proxy 127.0.0.1:7890 (Firefox is set up for it
+#         automatically; Telegram: Settings > Advanced > Connection type > SOCKS5, 127.0.0.1, 7890).
+VPN_MODE=tun
+# Let Firefox use the proxy automatically in proxy mode (yes/no).
+VPN_BROWSER=yes
+# Domain endings that go DIRECT, not through the VPN, comma separated. Example: ru,su
+VPN_DIRECT_SUFFIXES=

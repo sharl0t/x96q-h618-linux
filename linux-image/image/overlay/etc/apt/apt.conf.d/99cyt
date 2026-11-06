@@ -1,0 +1,3 @@
+// Keep our edited config files on upgrades, never ask questions.
+Dpkg::Options { "--force-confold"; "--force-confdef"; };
+APT::Install-Recommends "false";

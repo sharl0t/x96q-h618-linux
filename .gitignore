@@ -1,0 +1,10 @@
+# images, vendor firmware, logs and personal settings never go here
+*.img
+*.img.xz
+*.xz
+*.log
+build/
+firmware-*/
+my-settings*.txt
+cyt-config.applied*
+__pycache__/

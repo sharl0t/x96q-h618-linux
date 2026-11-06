@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Settings (text file)
+Comment=Edit /boot/cyt-config.txt, then it is applied at once
+Icon=preferences-system
+Terminal=false
+Exec=lxterminal -t "cyt-config" -e sh -c 'sudo nano /boot/cyt-config.txt && sudo systemctl restart cyt-firstboot && echo "Applied. Log: /var/log/cyt-firstboot.log" ; echo; read -p "Press Enter to close" x'

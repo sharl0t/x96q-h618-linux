@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply /boot/cyt-config.txt (Wi-Fi, user, VPN) and grow the root partition
+After=local-fs.target
+Before=display-manager.service network-pre.target wpa_supplicant@wlan0.service ssh.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cyt-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

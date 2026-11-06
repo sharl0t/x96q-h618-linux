@@ -1,0 +1,3 @@
+lxpolkit &
+pcmanfm --desktop --profile default &
+tint2 &

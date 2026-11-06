@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Settings
+Name[ru]=Настройки
+Comment=Wi-Fi, VPN, account, screen, system
+Icon=preferences-system
+Terminal=false
+Exec=cyt-settings
