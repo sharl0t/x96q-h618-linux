@@ -9,3 +9,6 @@ my-settings*.txt
 cyt-config.applied*
 __pycache__/
 *.part
+
+# personal notes and Android files, never published
+/my/
